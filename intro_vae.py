@@ -38,19 +38,6 @@ test_loader = torch.utils.data.DataLoader(
 
 
 class VAE(nn.Module):
-    def __init__(self):
-        super(VAE, self).__init__()
-
-        self.fc1 = nn.Linear(784, 400)
-        self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(20, 400)
-        self.fc4 = nn.Linear(400, 784)
-
-    def encode(self, x):
-        h1 = F.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
-
     def reparameterize(self, mu, logvar):
         if self.training:
             std = torch.exp(0.5*logvar)
@@ -59,41 +46,86 @@ class VAE(nn.Module):
         else:
             return mu
 
-    def decode(self, z):
+class Encoder(nn.Module):
+    def __init__(self):
+        super(Encoder, self).__init__()
+
+        self.fc1 = nn.Linear(784, 400)
+        self.fc21 = nn.Linear(400, 20)
+        self.fc22 = nn.Linear(400, 20)
+
+    def forward(self, x):
+        h1 = F.relu(self.fc1(x))
+        return self.fc21(h1), self.fc22(h1)
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super(Decoder, self).__init__()
+
+        self.fc3 = nn.Linear(20, 400)
+        self.fc4 = nn.Linear(400, 784)
+
+    def forward(self, z):
         h3 = F.relu(self.fc3(z))
         return F.sigmoid(self.fc4(h3))
 
-    def forward(self, x):
-        mu, logvar = self.encode(x.view(-1, 784))
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
 
+def l_reg(mu, std):
+    return - 0.5 * torch.mean(torch.sum(1 + torch.log(std ** 2) - mu ** 2 - std ** 2, dim=-1))
 
-model = VAE().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+alpha = 0.5
+beta = 0.5
+m = 1
 
-
-# Reconstruction + KL divergence losses summed over all elements and batch
-def loss_function(recon_x, x, mu, logvar):
-    BCE = F.binary_cross_entropy(recon_x, x.view(-1, 784), size_average=False)
-
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    return BCE + KLD
+encoder = Encoder().to(device)
+decoder = Decoder().to(device)
+optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=0.0002)
 
 
 def train(epoch):
-    model.train()
+    encoder.train()
+    decoder.train()
     train_loss = 0
     for batch_idx, (data, _) in enumerate(train_loader):
         data = data.to(device)
+        x = data
+        x = x.reshape(-1, 784)
         optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
-        loss = loss_function(recon_batch, data, mu, logvar)
+
+        z_mu, z_logvar = encoder(x)
+        z_std = torch.exp(0.5*z_logvar)
+        eps = torch.randn_like(z_std)
+        z = eps.mul(z_std).add_(z_mu)
+
+        x_r = decoder(z)
+        z_r_mu, z_r_logvar = encoder(x_r)
+        z_r_std = torch.exp(0.5*z_r_logvar)
+        eps = torch.randn_like(z_r_std)
+        z_r = eps.mul(z_r_std).add_(z_r_mu)
+
+        z_r_detach_mu, z_r_detach_logvar = encoder(x_r.detach())
+        z_r_detach_std = torch.exp(0.5*z_r_detach_logvar)
+        eps = torch.randn_like(z_r_detach_std)
+        z_r_detach = eps.mul(z_r_detach_std).add_(z_r_detach_mu)
+
+        z_p = torch.randn_like(z)
+        x_p = decoder(z_p)
+
+        z_pp_mu, z_pp_logvar = encoder(x_p)
+        z_pp_std = torch.exp(0.5*z_pp_logvar)
+        eps = torch.randn_like(z_pp_std)
+        z_pp = eps.mul(z_pp_std).add_(z_pp_mu)
+
+        z_pp_detach_mu, z_pp_detach_logvar = encoder(x_p.detach())
+        z_pp_detach_std = torch.exp(0.5*z_pp_detach_logvar)
+        eps = torch.randn_like(z_pp_detach_std)
+        z_pp_detach = eps.mul(z_pp_detach_std).add_(z_pp_detach_mu)
+
+        l_ae = torch.mean(torch.sum((x.reshape(-1, 784) - x_r.reshape(-1, 784)) ** 2, dim=-1))
+        l_e_adv = l_reg(z_mu, z_std) + alpha * (F.relu(m - l_reg(z_r_detach_mu, z_r_detach_std)) + F.relu(m - l_reg(z_pp_detach_mu, z_pp_detach_std)))
+        l_g_adv = alpha * (l_reg(z_r_mu, z_r_std) + l_reg(z_pp_mu, z_pp_std))
+        loss = l_e_adv + l_g_adv + beta * l_ae
+
         loss.backward()
         train_loss += loss.item()
         optimizer.step()
@@ -128,10 +160,10 @@ def test(epoch):
 
 for epoch in range(1, args.epochs + 1):
     train(epoch)
-    test(epoch)
+    #test(epoch)
     with torch.no_grad():
         sample = torch.randn(64, 20).to(device)
-        sample = model.decode(sample).cpu()
+        sample = decoder(sample).cpu()
         save_image(sample.view(64, 1, 28, 28),
                    'results/sample_' + str(epoch) + '.png')
 
