@@ -71,7 +71,7 @@ class Decoder(nn.Module):
 
 
 def l_reg(mu, std):
-    return - 0.5 * torch.mean(torch.sum(1 + torch.log(std ** 2) - mu ** 2 - std ** 2, dim=-1))
+    return - 0.5 * torch.sum(1 + torch.log(std ** 2) - mu ** 2 - std ** 2, dim=-1)
 
 alpha = 0.5
 beta = 0.5
@@ -121,10 +121,10 @@ def train(epoch):
         eps = torch.randn_like(z_pp_detach_std)
         z_pp_detach = eps.mul(z_pp_detach_std).add_(z_pp_detach_mu)
 
-        l_ae = torch.mean(torch.sum((x.reshape(-1, 784) - x_r.reshape(-1, 784)) ** 2, dim=-1))
+        l_ae = torch.sum((x.reshape(-1, 784) - x_r.reshape(-1, 784)) ** 2, dim=-1)
         l_e_adv = l_reg(z_mu, z_std) + alpha * (F.relu(m - l_reg(z_r_detach_mu, z_r_detach_std)) + F.relu(m - l_reg(z_pp_detach_mu, z_pp_detach_std)))
         l_g_adv = alpha * (l_reg(z_r_mu, z_r_std) + l_reg(z_pp_mu, z_pp_std))
-        loss = l_e_adv + l_g_adv + beta * l_ae
+        loss = torch.mean(l_e_adv + l_g_adv + beta * l_ae)
 
         loss.backward()
         train_loss += loss.item()
