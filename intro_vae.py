@@ -73,9 +73,21 @@ class Decoder(nn.Module):
 def l_reg(mu, std):
     return - 0.5 * torch.sum(1 + torch.log(std ** 2) - mu ** 2 - std ** 2, dim=-1)
 
+def loss_function(x, x_r,
+                z_mu, z_std,
+                z_r_mu, z_r_std,
+                z_pp_mu, z_pp_std,
+                z_r_detach_mu, z_r_detach_std,
+                z_pp_detach_mu, z_pp_detach_std):
+        l_ae = torch.sum((x.reshape(-1, 784) - x_r.reshape(-1, 784)) ** 2, dim=-1)
+        l_e_adv = l_reg(z_mu, z_std) + alpha * (F.relu(m - l_reg(z_r_detach_mu, z_r_detach_std)) + F.relu(m - l_reg(z_pp_detach_mu, z_pp_detach_std)))
+        l_g_adv = alpha * (l_reg(z_r_mu, z_r_std) + l_reg(z_pp_mu, z_pp_std))
+        loss = torch.mean(l_e_adv + l_g_adv + beta * l_ae)
+        return loss
+
 alpha = 0.5
 beta = 0.5
-m = 1
+m = 0.5
 
 encoder = Encoder().to(device)
 decoder = Decoder().to(device)
@@ -121,10 +133,12 @@ def train(epoch):
         eps = torch.randn_like(z_pp_detach_std)
         z_pp_detach = eps.mul(z_pp_detach_std).add_(z_pp_detach_mu)
 
-        l_ae = torch.sum((x.reshape(-1, 784) - x_r.reshape(-1, 784)) ** 2, dim=-1)
-        l_e_adv = l_reg(z_mu, z_std) + alpha * (F.relu(m - l_reg(z_r_detach_mu, z_r_detach_std)) + F.relu(m - l_reg(z_pp_detach_mu, z_pp_detach_std)))
-        l_g_adv = alpha * (l_reg(z_r_mu, z_r_std) + l_reg(z_pp_mu, z_pp_std))
-        loss = torch.mean(l_e_adv + l_g_adv + beta * l_ae)
+        loss = loss_function(x, x_r,
+                z_mu, z_std,
+                z_r_mu, z_r_std,
+                z_pp_mu, z_pp_std,
+                z_r_detach_mu, z_r_detach_std,
+                z_pp_detach_mu, z_pp_detach_std)
 
         loss.backward()
         train_loss += loss.item()
@@ -140,19 +154,52 @@ def train(epoch):
 
 
 def test(epoch):
-    model.eval()
+    encoder.eval()
+    decoder.eval()
     test_loss = 0
     with torch.no_grad():
         for i, (data, _) in enumerate(test_loader):
             data = data.to(device)
-            recon_batch, mu, logvar = model(data)
-            test_loss += loss_function(recon_batch, data, mu, logvar).item()
-            if i == 0:
-                n = min(data.size(0), 8)
-                comparison = torch.cat([data[:n],
-                                      recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
-                save_image(comparison.cpu(),
-                         'results/reconstruction_' + str(epoch) + '.png', nrow=n)
+            x = data
+            x = x.reshape(-1, 784)
+
+            z_mu, z_logvar = encoder(x)
+            z_std = torch.exp(0.5*z_logvar)
+            eps = torch.randn_like(z_std)
+            z = eps.mul(z_std).add_(z_mu)
+
+            x_r = decoder(z)
+            z_r_mu, z_r_logvar = encoder(x_r)
+            z_r_std = torch.exp(0.5*z_r_logvar)
+            eps = torch.randn_like(z_r_std)
+            z_r = eps.mul(z_r_std).add_(z_r_mu)
+
+            z_r_detach_mu, z_r_detach_logvar = encoder(x_r.detach())
+            z_r_detach_std = torch.exp(0.5*z_r_detach_logvar)
+            eps = torch.randn_like(z_r_detach_std)
+            z_r_detach = eps.mul(z_r_detach_std).add_(z_r_detach_mu)
+
+            z_p = torch.randn_like(z)
+            x_p = decoder(z_p)
+
+            z_pp_mu, z_pp_logvar = encoder(x_p)
+            z_pp_std = torch.exp(0.5*z_pp_logvar)
+            eps = torch.randn_like(z_pp_std)
+            z_pp = eps.mul(z_pp_std).add_(z_pp_mu)
+
+            z_pp_detach_mu, z_pp_detach_logvar = encoder(x_p.detach())
+            z_pp_detach_std = torch.exp(0.5*z_pp_detach_logvar)
+            eps = torch.randn_like(z_pp_detach_std)
+            z_pp_detach = eps.mul(z_pp_detach_std).add_(z_pp_detach_mu)
+
+            loss = loss_function(x, x_r,
+                    z_mu, z_std,
+                    z_r_mu, z_r_std,
+                    z_pp_mu, z_pp_std,
+                    z_r_detach_mu, z_r_detach_std,
+                    z_pp_detach_mu, z_pp_detach_std)
+
+            test_loss += loss.item()
 
     test_loss /= len(test_loader.dataset)
     print('====> Test set loss: {:.4f}'.format(test_loss))
@@ -160,7 +207,7 @@ def test(epoch):
 
 for epoch in range(1, args.epochs + 1):
     train(epoch)
-    #test(epoch)
+    test(epoch)
     with torch.no_grad():
         sample = torch.randn(64, 20).to(device)
         sample = decoder(sample).cpu()
